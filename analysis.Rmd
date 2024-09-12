@@ -1,0 +1,1071 @@
+---
+title: "On The Role of Context in Reading Time Prediction"
+output: html_notebook
+---
+
+```{r}
+shhh <- suppressPackageStartupMessages # It's a library, so shhh!
+
+shhh(library( mgcv ))
+shhh(library(dplyr))
+shhh(library(ggplot2))
+shhh(library(lme4))
+shhh(library(tidymv))
+shhh(library(gamlss))
+shhh(library(gsubfn))
+shhh(library(lmerTest))
+shhh(library(tidyverse))
+shhh(library(boot))
+shhh(library(rsample))
+shhh(library(plotrix))
+shhh(library(ggrepel))
+shhh(library(mgcv))
+shhh(library(relaimpo))
+library(jmuOutlier) # For paired permutation tests
+
+theme_set(theme_bw())
+options(digits=4)
+options(dplyr.summarise.inform = FALSE)
+```
+
+```{r}
+
+set.seed(444)
+langs = c("du", "en", "fi", "ge", "gr", "he", "it", "ko", "sp", "tr", "ru")
+psychometrics = c("total_rt", "gaze_rt", "firstfix_rt")
+models = c("mgpt_lc")
+comps = c("target", "baseline")
+
+```
+
+
+```{r}
+
+combined_df = data.frame()
+
+for(lang in langs){
+  
+   df = read.csv(paste0("./merged_data/", lang, ".csv")) %>%
+    filter(freq > 0, prev_freq > 0, prev2_freq > 0) %>%
+    mutate( freq = -log2(freq), prev_freq = -log2(prev_freq), prev2_freq = -log2(prev2_freq),
+            pmi = freq - surp, 
+            prev_pmi = prev_freq - prev_surp, 
+            prev2_pmi = prev2_freq - prev2_surp)
+   
+   combined_df = rbind(combined_df, df %>% mutate(lang = lang))
+  
+}
+
+write.csv(combined_df %>% dplyr::select(-X), "./combined_df.csv")
+
+```
+
+```{r}
+
+combined_df %>%
+  filter(lang == "en") %>%
+  ggplot(aes(x = surp, y=freq, color = pmi)) +
+    geom_point()
+
+
+```
+## EXPERIMENT 1: Linear models to interpret effects of context
+
+```{r}
+
+l = langs[2]
+
+df = read.csv(paste0("./merged_data/", l, ".csv")) %>%
+    filter(freq > 0, prev_freq > 0, prev2_freq > 0) %>%
+    mutate( freq = -log2(freq), prev_freq = -log2(prev_freq), prev2_freq = -log2(prev2_freq),
+            pmi = freq - surp, 
+            prev_pmi = prev_freq - prev_surp, 
+            prev2_pmi = prev2_freq - prev2_surp) %>%
+    mutate(freq = freq - mean(freq), prev_freq = prev_freq - mean(prev_freq), prev2_freq = prev2_freq - mean(prev2_freq),
+           surp = surp - mean(surp), prev_surp = prev_surp - mean(prev_surp), prev2_surp = prev2_surp - mean(prev2_surp),
+           pmi = pmi - mean(pmi), prev_pmi = prev_pmi - mean(prev_pmi), prev2_pmi = prev2_pmi - mean(prev2_pmi)) %>%
+    mutate( orthogonal_surp = surp - (cov(df$freq, df$surp)/cov(df$freq, df$freq)) * freq,
+            orthogonal_pmi = pmi - (cov(df$freq, df$pmi)/cov(df$freq, df$freq)) * freq)
+
+```
+
+
+```{r}
+
+get_model_coeffs = function(form, df, mixed_effects, num_folds=10){
+  
+  folds <- cut(seq(1,nrow(df)),breaks=num_folds,labels=FALSE)
+  
+  coeffs = data.frame()
+  for(i in 1:num_folds){
+    testIndexes = which(folds==i,arr.ind=TRUE)
+    trainData = df[-testIndexes,]
+    
+    trainData = trainData %>% 
+      mutate(freq = (freq - mean(freq))/sd(freq), prev_freq = (prev_freq - mean(prev_freq))/sd(prev_freq), prev2_freq = (prev2_freq - mean(prev2_freq))/sd(prev2_freq),
+           surp = (surp - mean(surp))/sd(surp), prev_surp = (prev_surp - mean(prev_surp))/sd(prev_surp), prev2_surp = (prev2_surp - mean(prev2_surp))/sd(prev2_surp),
+           pmi = (pmi - mean(pmi))/sd(pmi), prev_pmi = (prev_pmi - mean(prev_pmi))/sd(prev_pmi), prev2_pmi = (prev2_pmi - mean(prev2_pmi))/sd(prev2_pmi)) %>%
+      mutate(orthogonal_surp = surp - (cov(trainData$freq, trainData$surp)/cov(trainData$freq, trainData$freq)) * freq,
+                                     prev_orthogonal_surp = prev_surp - (cov(trainData$prev_freq, trainData$prev_surp)/cov(trainData$prev_freq, trainData$prev_freq)) * prev_freq,
+                                     orthogonal_pmi = pmi - (cov(trainData$freq, trainData$pmi)/cov(trainData$freq, trainData$freq)) * freq,
+                                     prev_orthogonal_pmi = prev_pmi - (cov(trainData$prev_freq, trainData$prev_pmi)/cov(trainData$prev_freq, trainData$prev_freq)) * prev_freq)
+
+    if(mixed_effects){
+      model = lmer(as.formula(form), data = trainData)
+    } else {
+      model = lm(as.formula(form), data = trainData)
+    }
+
+    coeffs = rbind(coeffs, model$coefficients)
+  }
+  #print(model$coefficients)
+  return(coeffs)
+}
+
+get_model_importance = function(form, df, mixed_effects, num_folds=10){
+  
+  folds <- cut(seq(1,nrow(df)),breaks=num_folds,labels=FALSE)
+  
+  metrics = data.frame()
+  for(i in 1:num_folds){
+    testIndexes = which(folds==i,arr.ind=TRUE)
+    trainData = df[-testIndexes,]
+    
+    trainData = trainData %>% 
+      mutate(freq = freq - mean(freq), prev_freq = prev_freq - mean(prev_freq), prev2_freq = prev2_freq - mean(prev2_freq),
+           surp = surp - mean(surp), prev_surp = prev_surp - mean(prev_surp), prev2_surp = prev2_surp - mean(prev2_surp),
+           pmi = pmi - mean(pmi), prev_pmi = prev_pmi - mean(prev_pmi), prev2_pmi = prev2_pmi - mean(prev2_pmi),
+           len = len - mean(len), prev_len = prev_len - mean(prev_len), prev2_len = prev2_len - mean(prev2_len)) %>%
+      mutate(orthogonal_surp = surp - (cov(trainData$freq, trainData$surp)/cov(trainData$freq, trainData$freq)) * freq,
+              prev_orthogonal_surp = prev_surp - (cov(trainData$prev_freq, trainData$prev_surp)/cov(trainData$prev_freq, trainData$prev_freq)) * prev_freq,
+              orthogonal_pmi = pmi - (cov(trainData$freq, trainData$pmi)/cov(trainData$freq, trainData$freq)) * freq,
+              prev_orthogonal_pmi = prev_pmi - (cov(trainData$prev_freq, trainData$prev_pmi)/cov(trainData$prev_freq, trainData$prev_freq)) * prev_freq,
+              orthogonal_len = len - (cov(trainData$freq, trainData$len)/cov(trainData$freq, trainData$freq)) * freq,
+              prev_orthogonal_len = prev_len - (cov(trainData$prev_freq, trainData$prev_len)/cov(trainData$prev_freq, trainData$prev_freq)) * prev_freq)
+
+    if(mixed_effects){
+      model = lmer(as.formula(form), data = trainData)
+    } else {
+      model = lm(as.formula(form), data = trainData)
+    }
+    
+    res = calc.relimp(model, type = c("lmg"))
+    metrics = rbind(metrics, c(R2=res$R2, res$lmg))
+  }
+  
+  
+  return(metrics)
+}
+
+```
+
+
+```{r}
+
+#toggle_surp = FALSE
+toggle_surp = TRUE
+
+xlang_coeff_df = data.frame(matrix(ncol = 5, nrow = 0))
+columnnames = c("intercept", "surp OR pmi", "previous surp OR pmi", "frequency", "previous frequency")
+colnames(xlang_coeff_df) = columnnames
+
+xlang_lmg_df = data.frame(matrix(ncol = 5, nrow = 0))
+columnnames2 = c("R2", "surp OR pmi", "previous surp OR pmi", "frequency", "previous frequency")
+colnames(xlang_lmg_df) = columnnames2
+
+if (toggle_surp) {
+  regression_form = "gaze_rt ~ surp + prev_surp + freq + prev_freq"
+  #regression_form = "gaze_rt ~ surp + freq"
+} else {
+  regression_form = "gaze_rt ~ pmi + prev_pmi + freq + prev_freq"
+}
+
+
+for (l in langs) {
+  
+  print(paste0("Fitting standard model for ", l))
+  
+  df = read.csv(paste0("./merged_data/", l, ".csv")) %>%
+    filter(freq > 0, prev_freq > 0, prev2_freq > 0) %>%
+    mutate( freq = -log2(freq), prev_freq = -log2(prev_freq), prev2_freq = -log2(prev2_freq),
+            pmi = freq - surp, 
+            prev_pmi = prev_freq - prev_surp, 
+            prev2_pmi = prev2_freq - prev2_surp)
+  
+  for (m in models) {
+    
+    df_eval = df %>% filter(model == m) %>% drop_na()
+      
+    coeff_df = get_model_coeffs(regression_form, df=df, mixed_effects = F)
+    colnames(coeff_df) = columnnames
+    
+    lmg_df = get_model_importance(regression_form, df=df, mixed_effects = F)
+    colnames(lmg_df) = columnnames2
+    
+    if (toggle_surp) {
+      xlang_coeff_df = rbind(xlang_coeff_df, coeff_df %>% mutate(lang = l, model = m, orthogonalized = FALSE, surp = TRUE))
+      xlang_lmg_df = rbind(xlang_lmg_df, lmg_df %>% mutate(lang = l, model = m, orthogonalized = FALSE, surp = TRUE))
+    } else{
+      xlang_coeff_df = rbind(xlang_coeff_df, coeff_df %>% mutate(lang = l, model = m, orthogonalized = FALSE, surp = FALSE))
+      xlang_lmg_df = rbind(xlang_lmg_df, lmg_df %>% mutate(lang = l, model = m, orthogonalized = FALSE, surp = FALSE))
+    }
+      
+
+  }
+}
+
+if (toggle_surp) {
+  regression_form = "gaze_rt ~ orthogonal_surp + prev_orthogonal_surp + freq + prev_freq"
+  #regression_form = "gaze_rt ~ orthogonal_surp + freq"
+} else {
+  regression_form = "gaze_rt ~ orthogonal_pmi + prev_orthogonal_pmi + freq + prev_freq"
+}
+
+
+for (l in langs) {
+  
+  print(paste0("Fitting orthogonalized model for ", l))
+  
+  df = read.csv(paste0("./merged_data/", l, ".csv")) %>%
+    filter(freq > 0, prev_freq > 0, prev2_freq > 0) %>%
+    mutate( freq = -log2(freq), prev_freq = -log2(prev_freq), prev2_freq = -log2(prev2_freq),
+            pmi = freq - surp, 
+            prev_pmi = prev_freq - prev_surp, 
+            prev2_pmi = prev2_freq - prev2_surp)
+  
+  for (m in models) {
+    
+    df_eval = df %>% filter(model == m) %>% drop_na()
+      
+    coeff_df = get_model_coeffs(regression_form, df=df, mixed_effects = F)
+    colnames(coeff_df) = columnnames
+    
+    lmg_df = get_model_importance(regression_form, df=df, mixed_effects = F)
+    colnames(lmg_df) = columnnames2
+    
+    if (toggle_surp) {
+      xlang_coeff_df = rbind(xlang_coeff_df, coeff_df %>% mutate(lang = l, model = m, orthogonalized = TRUE, surp = TRUE))
+      xlang_lmg_df = rbind(xlang_lmg_df, lmg_df %>% mutate(lang = l, model = m, orthogonalized = TRUE, surp = TRUE))
+    } else{
+      xlang_coeff_df = rbind(xlang_coeff_df, coeff_df %>% mutate(lang = l, model = m, orthogonalized = TRUE, surp = FALSE))
+      xlang_lmg_df = rbind(xlang_lmg_df, lmg_df %>% mutate(lang = l, model = m, orthogonalized = TRUE, surp = FALSE))
+    }
+      
+
+  }
+}
+
+if (toggle_surp) {
+      xlang_coeff_df_surp = xlang_coeff_df
+      xlang_lmg_df_surp = xlang_lmg_df
+    } else {
+      xlang_coeff_df_pmi = xlang_coeff_df
+      xlang_lmg_df_pmi = xlang_lmg_df
+}
+
+```
+
+## IMPORTANT: Need to run the previous block for both values of toggle_surp before proceeding
+
+```{r}
+
+xlang_coeff_df = rbind(xlang_coeff_df_surp, xlang_coeff_df_pmi)
+xlang_lmg_df = rbind(xlang_lmg_df_surp, xlang_lmg_df_pmi)
+
+```
+
+
+
+
+```{r}
+coeff_plotting_df %>%
+  filter(name == "surp") %>%
+  group_by(model) %>%
+    summarise(m = mean(m)) %>%
+  ungroup()
+
+```
+
+## Plot the LMG values
+
+```{r}
+
+coeff_plotting_df = xlang_lmg_df %>%
+  gather(name, value, c(2:length(columnnames2))) %>%
+  group_by(lang, name, model, orthogonalized, surp) %>%
+    summarise(m = mean(value),
+              s = std.error(value),
+              upper = m + s * 1.96,
+              lower = m - s * 1.96) %>%
+  ungroup() %>%
+  filter((surp == TRUE & orthogonalized == TRUE) | (surp == TRUE & orthogonalized == FALSE) | (surp == FALSE & orthogonalized == FALSE) ) %>%
+  mutate(position = case_when(
+    #name %in% c("R2") ~ "0",
+    name %in% c("frequency", "surp OR pmi") ~ "0",
+    name %in% c("previous frequency", "previous surp OR pmi") ~ "1",
+  )) %>%
+  mutate(lmodel = case_when(
+    orthogonalized == FALSE & surp == TRUE ~ "Surprisal",
+    orthogonalized == FALSE & surp == FALSE ~ "PMI",
+    orthogonalized == TRUE & surp == TRUE ~ "Orth. Surprisal",
+  )) %>%
+  mutate(predictor = case_when(
+    name %in% c("frequency", "previous frequency") ~ "Frequency",
+    name %in% c("surp OR pmi", "previous surp OR pmi") ~ "Context",
+    #name %in% c("R2") ~ "R2",
+  )) %>%
+  mutate(lmodel = factor(lmodel, levels = c("Surprisal", "PMI", "Orth. Surprisal"))) %>%
+  mutate(predictor = factor(predictor, levels = c("Frequency", "Context"), labels = c("Frequency", "Context (Surprisal / PMI / Orthogonalized Surprisal)"))) %>%
+  mutate(position = factor(position, labels = c("w t", "w t-1"), levels = c("0", "1")))
+```
+
+```{r}
+coeff_plotting_df %>%
+    mutate(lang = factor(lang, levels = c("du", "en", "fi", "ge", "gr", "he", "it", "ko", "ru", "sp", "tr"),
+       labels = c("Dutch", "English", "Finnish", "German", "Greek", "Hebrew", "Italian", "Korean", "Russian",
+                  "Spanish", "Turkish"))) %>%
+  ggplot(aes(x = position, y = m, fill = predictor)) +
+    geom_bar(stat="identity", position = position_dodge(width = 0.9)) +
+    geom_errorbar(aes(ymin=lower, ymax=upper), position = position_dodge(width = 0.9), width = 0.1) +
+    geom_hline(yintercept = 0, color = "black") +
+  ylab("Explained Variance (LMG)") +
+  facet_grid(lmodel~lang, scales = "free_y") +
+  scale_x_discrete(labels = c(bquote(w[t]), bquote(w[t-1]))) +
+  #scale_color_manual(values = c("#225ea8", "#41b6c4", "#a1dab4")) +
+  theme(
+    text = element_text(family = "serif", size=14),
+    axis.title.x = element_blank(),
+    legend.position = "bottom"
+  )
+
+ggsave("./images/orthogonalized_comparison_lmg.pdf", width = 9, height = 5)
+
+```
+
+#### Doing the same analysis with orthogonalized length
+
+```{r}
+
+toggle_surp = FALSE
+#toggle_surp = TRUE
+
+xlang_lmg_df = data.frame(matrix(ncol = 7, nrow = 0))
+columnnames = c("R2", "surp OR pmi", "previous surp OR pmi", "frequency", "previous frequency", "length", "previous length")
+colnames(xlang_lmg_df) = columnnames
+
+
+if (toggle_surp) {
+  regression_form = "gaze_rt ~ surp + prev_surp + freq + prev_freq + len + prev_len"
+} else {
+  regression_form = "gaze_rt ~ pmi + prev_pmi + freq + prev_freq + len + prev_len"
+}
+
+for (l in langs) {
+  
+  print(paste0("Fitting standard model for ", l))
+  
+  df = read.csv(paste0("./merged_data/", l, ".csv")) %>%
+    filter(freq > 0, prev_freq > 0, prev2_freq > 0) %>%
+    mutate( freq = -log2(freq), prev_freq = -log2(prev_freq), prev2_freq = -log2(prev2_freq),
+            pmi = freq - surp, 
+            prev_pmi = prev_freq - prev_surp, 
+            prev2_pmi = prev2_freq - prev2_surp)
+  
+  for (m in models) {
+    
+    df_eval = df %>% filter(model == m) %>% drop_na()
+    
+    lmg_df = get_model_importance(regression_form, df=df, mixed_effects = F)
+    colnames(lmg_df) = columnnames
+    
+    
+    if (toggle_surp) {
+      xlang_lmg_df = rbind(xlang_lmg_df, lmg_df %>% mutate(lang = l, model = m, orthogonalized = FALSE, surp = TRUE))
+    } else{
+      xlang_lmg_df = rbind(xlang_lmg_df, lmg_df %>% mutate(lang = l, model = m, orthogonalized = FALSE, surp = FALSE))
+    }
+
+  }
+}
+
+if (toggle_surp) {
+  regression_form = "gaze_rt ~ orthogonal_surp + prev_orthogonal_surp + freq + prev_freq + orthogonal_len + prev_orthogonal_len"
+} else {
+  regression_form = "gaze_rt ~ orthogonal_pmi + prev_orthogonal_pmi + freq + prev_freq + orthogonal_len + prev_orthogonal_len"
+}
+
+for (l in langs) {
+  
+  print(paste0("Fitting orthogonalized model for ", l))
+  
+  df = read.csv(paste0("./merged_data/", l, ".csv")) %>%
+    filter(freq > 0, prev_freq > 0, prev2_freq > 0) %>%
+    mutate( freq = -log2(freq), prev_freq = -log2(prev_freq), prev2_freq = -log2(prev2_freq),
+            pmi = freq - surp, 
+            prev_pmi = prev_freq - prev_surp, 
+            prev2_pmi = prev2_freq - prev2_surp)
+  
+  for (m in models) {
+    
+    df_eval = df %>% filter(model == m) %>% drop_na()
+    
+    lmg_df = get_model_importance(regression_form, df=df, mixed_effects = F)
+    colnames(lmg_df) = columnnames
+    
+    if (toggle_surp) {
+      xlang_lmg_df = rbind(xlang_lmg_df, lmg_df %>% mutate(lang = l, model = m, orthogonalized = TRUE, surp = TRUE))
+    } else{
+      xlang_lmg_df = rbind(xlang_lmg_df, lmg_df %>% mutate(lang = l, model = m, orthogonalized = TRUE, surp = FALSE))
+    }
+
+  }
+}
+
+if (toggle_surp) {
+      xlang_lmg_df_surp = xlang_lmg_df
+    } else {
+      xlang_lmg_df_pmi = xlang_lmg_df
+}
+
+```
+
+## Need to run the previous block for both values of toggle_surp before proceeding
+
+```{r}
+
+xlang_lmg_df = rbind(xlang_lmg_df_surp, xlang_lmg_df_pmi)
+
+```
+
+
+## Plot the LMG values
+
+```{r}
+
+coeff_plotting_df = xlang_lmg_df %>%
+  gather(name, value, c(2:length(columnnames))) %>%
+  group_by(lang, name, model, orthogonalized, surp) %>%
+    summarise(m = mean(value),
+              s = std.error(value),
+              upper = m + s * 1.96,
+              lower = m - s * 1.96) %>%
+  ungroup() %>%
+  filter((surp == TRUE & orthogonalized == TRUE) | (surp == TRUE & orthogonalized == FALSE) | (surp == FALSE & orthogonalized == FALSE) ) %>%
+  mutate(position = case_when(
+    #name %in% c("R2") ~ "0",
+    name %in% c("frequency", "surp OR pmi", "length") ~ "0",
+    name %in% c("previous frequency", "previous surp OR pmi", "previous length") ~ "1",
+  )) %>%
+  mutate(lmodel = case_when(
+    orthogonalized == FALSE & surp == TRUE ~ "Surprisal",
+    orthogonalized == FALSE & surp == FALSE ~ "PMI",
+    orthogonalized == TRUE ~ "Orthogonalized",
+  )) %>%
+  mutate(predictor = case_when(
+    name %in% c("frequency", "previous frequency") ~ "Frequency",
+    name %in% c("surp OR pmi", "previous surp OR pmi") ~ "Context",
+    name %in% c("length", "previous length") ~ "Length",
+  )) %>%
+  mutate(lmodel = factor(lmodel, levels = c("Surprisal", "PMI", "Orthogonalized"))) %>%
+  mutate(predictor = factor(predictor, levels = c("Frequency", "Context", "Length"), labels = c("Frequency (Unigram Surprisal)", "Context (Contextual Surprisal / PMI / Orthogonalized Surprisal)", "Length / Orthogonalized Length"))) %>%
+  mutate(position = factor(position, labels = c("w t", "w t-1"), levels = c("0", "1")))
+```
+
+```{r}
+coeff_plotting_df %>%
+    mutate(lang = factor(lang, levels = c("du", "en", "fi", "ge", "gr", "he", "it", "ko", "ru", "sp", "tr"),
+       labels = c("Dutch", "English", "Finnish", "German", "Greek", "Hebrew", "Italian", "Korean", "Russian",
+                  "Spanish", "Turkish"))) %>%
+  ggplot(aes(x = position, y = m, fill = predictor)) +
+    geom_bar(stat="identity", position = position_dodge(width = 0.9)) +
+    geom_errorbar(aes(ymin=lower, ymax=upper), position = position_dodge(width = 0.9), width = 0.1) +
+    geom_hline(yintercept = 0, color = "black") +
+  ylab("Explained Variance (LMG)") +
+  facet_grid(lmodel~lang, scales = "free_y") +
+  scale_x_discrete(labels = c(bquote(w[t]), bquote(w[t-1]))) +
+  #scale_color_manual(values = c("#225ea8", "#41b6c4", "#a1dab4")) +
+  theme(
+    text = element_text(family = "serif", size=11),
+    axis.title.x = element_blank(),
+    legend.position = "bottom"
+  )
+
+ggsave("./images/orthogonalized_comparison_lmg_length.pdf", width = 9, height = 5)
+
+```
+
+### Projecting Frequency onto the orthogonal complement of surprisal
+
+```{r}
+
+get_model_importance = function(form, df, mixed_effects, num_folds=10){
+  
+  folds <- cut(seq(1,nrow(df)),breaks=num_folds,labels=FALSE)
+  
+  metrics = data.frame()
+  for(i in 1:num_folds){
+    testIndexes = which(folds==i,arr.ind=TRUE)
+    trainData = df[-testIndexes,]
+    
+    trainData = trainData %>% 
+      mutate(freq = freq - mean(freq), prev_freq = prev_freq - mean(prev_freq), prev2_freq = prev2_freq - mean(prev2_freq),
+           surp = surp - mean(surp), prev_surp = prev_surp - mean(prev_surp), prev2_surp = prev2_surp - mean(prev2_surp),
+           pmi = pmi - mean(pmi), prev_pmi = prev_pmi - mean(prev_pmi), prev2_pmi = prev2_pmi - mean(prev2_pmi),
+           len = len - mean(len), prev_len = prev_len - mean(prev_len), prev2_len = prev2_len - mean(prev2_len)) %>%
+      mutate(orthogonal_freq = freq - (cov(trainData$surp, trainData$freq)/cov(trainData$surp, trainData$surp)) * surp,
+              prev_orthogonal_freq = prev_freq - (cov(trainData$prev_surp, trainData$prev_freq)/cov(trainData$prev_surp, trainData$prev_surp)) * prev_surp,
+              )
+
+    if(mixed_effects){
+      model = lmer(as.formula(form), data = trainData)
+    } else {
+      model = lm(as.formula(form), data = trainData)
+    }
+    
+    res = calc.relimp(model, type = c("lmg"))
+    metrics = rbind(metrics, c(R2=res$R2, res$lmg))
+  }
+  
+  
+  return(metrics)
+}
+
+```
+
+```{r}
+
+
+
+xlang_lmg_df = data.frame(matrix(ncol = 5, nrow = 0))
+columnnames = c("intercept", "surp", "previous surp", "frequency", "previous frequency")
+colnames(xlang_lmg_df) = columnnames
+
+regression_form = "gaze_rt ~ surp + prev_surp + freq + prev_freq"
+
+for (l in langs) {
+  
+  print(paste0("Fitting standard model for ", l))
+  
+  df = read.csv(paste0("./merged_data/", l, ".csv")) %>%
+    filter(freq > 0, prev_freq > 0, prev2_freq > 0) %>%
+    mutate( freq = -log2(freq), prev_freq = -log2(prev_freq), prev2_freq = -log2(prev2_freq),
+            pmi = freq - surp, 
+            prev_pmi = prev_freq - prev_surp, 
+            prev2_pmi = prev2_freq - prev2_surp)
+  
+  for (m in models) {
+    
+    df_eval = df %>% filter(model == m) %>% drop_na()
+    
+    lmg_df = get_model_importance(regression_form, df=df, mixed_effects = F)
+    colnames(lmg_df) = columnnames
+    
+    xlang_lmg_df = rbind(xlang_lmg_df, lmg_df %>% mutate(lang = l, model = m, orthogonalized = FALSE))
+
+  }
+}
+
+regression_form = "gaze_rt ~ surp + prev_surp + orthogonal_freq + prev_orthogonal_freq"
+
+
+
+for (l in langs) {
+  
+  print(paste0("Fitting orthogonalized model for ", l))
+  
+  df = read.csv(paste0("./merged_data/", l, ".csv")) %>%
+    filter(freq > 0, prev_freq > 0, prev2_freq > 0) %>%
+    mutate( freq = -log2(freq), prev_freq = -log2(prev_freq), prev2_freq = -log2(prev2_freq),
+            pmi = freq - surp, 
+            prev_pmi = prev_freq - prev_surp, 
+            prev2_pmi = prev2_freq - prev2_surp)
+  
+  for (m in models) {
+    
+    df_eval = df %>% filter(model == m) %>% drop_na()
+
+    
+    lmg_df = get_model_importance(regression_form, df=df, mixed_effects = F)
+    colnames(lmg_df) = columnnames
+    
+    xlang_lmg_df = rbind(xlang_lmg_df, lmg_df %>% mutate(lang = l, model = m, orthogonalized = TRUE))
+      
+
+  }
+}
+
+```
+
+## Plot the LMG values
+
+```{r}
+
+coeff_plotting_df = xlang_lmg_df %>%
+  gather(name, value, c(2:length(columnnames))) %>%
+  group_by(lang, name, model, orthogonalized) %>%
+    summarise(m = mean(value),
+              s = std.error(value),
+              upper = m + s * 1.96,
+              lower = m - s * 1.96) %>%
+  ungroup() %>%
+  mutate(position = case_when(
+    #name %in% c("R2") ~ "0",
+    name %in% c("frequency", "surp") ~ "0",
+    name %in% c("previous frequency", "previous surp") ~ "1",
+  )) %>%
+  mutate(lmodel = case_when(
+    orthogonalized == FALSE ~ "Frequency",
+    orthogonalized == TRUE ~ "Orth. Frequency",
+  )) %>%
+  mutate(predictor = case_when(
+    name %in% c("frequency", "previous frequency") ~ "Frequency",
+    name %in% c("surp", "previous surp") ~ "Surprisal",
+    #name %in% c("R2") ~ "R2",
+  )) %>%
+  mutate(lmodel = factor(lmodel, levels = c("Frequency", "Orth. Frequency"))) %>%
+  mutate(predictor = factor(predictor, levels = c("Frequency", "Surprisal"), labels = c("Frequency (Frequency / Orthogonalized Frequency)", "Context (Surprisal)"))) %>%
+  mutate(position = factor(position, labels = c("w t", "w t-1"), levels = c("0", "1")))
+```
+
+```{r}
+coeff_plotting_df %>%
+    mutate(lang = factor(lang, levels = c("du", "en", "fi", "ge", "gr", "he", "it", "ko", "ru", "sp", "tr"),
+       labels = c("Dutch", "English", "Finnish", "German", "Greek", "Hebrew", "Italian", "Korean", "Russian",
+                  "Spanish", "Turkish"))) %>%
+  ggplot(aes(x = position, y = m, fill = predictor)) +
+    geom_bar(stat="identity", position = position_dodge(width = 0.9)) +
+    geom_errorbar(aes(ymin=lower, ymax=upper), position = position_dodge(width = 0.9), width = 0.1) +
+    geom_hline(yintercept = 0, color = "black") +
+  ylab("Explained Variance (LMG)") +
+  facet_grid(lmodel~lang, scales = "free_y") +
+  scale_x_discrete(labels = c(bquote(w[t]), bquote(w[t-1]))) +
+  #scale_color_manual(values = c("#225ea8", "#41b6c4", "#a1dab4")) +
+  theme(
+    text = element_text(family = "serif", size=14),
+    axis.title.x = element_blank(),
+    legend.position = "bottom"
+  )
+
+ggsave("./images/orthogonalized_frequency_comparison_lmg.pdf", width = 9, height = 5)
+
+```
+
+
+
+## EXPERIMENT 2: GAMs to study effect of each predictor
+## Compute DLL for Each Language
+
+```{r}
+
+model_cross_val = function(form, id, df, d_var, mixed_effects, psychometric, lang, num_folds=10, linear=FALSE){
+  
+  folds <- cut(seq(1,nrow(df)),breaks=num_folds,labels=FALSE)
+
+  estimates <- c()
+  models <- c()
+  for(i in 1:num_folds){
+    testIndexes = which(folds==i,arr.ind=TRUE)
+    testData = df[testIndexes,]
+    trainData = df[-testIndexes,]
+    
+    trainData = trainData %>% mutate(orthogonal_surp = surp - (cov(trainData$freq, trainData$surp)/cov(trainData$freq, trainData$freq)) * freq,
+                                     prev_orthogonal_surp = prev_surp - (cov(trainData$prev_freq, trainData$prev_surp)/cov(trainData$prev_freq, trainData$prev_freq)) * prev_freq,
+                                     orthogonal_pmi = pmi - (cov(trainData$freq, trainData$pmi)/cov(trainData$freq, trainData$freq)) * freq,
+                                     prev_orthogonal_pmi = prev_pmi - (cov(trainData$prev_freq, trainData$prev_pmi)/cov(trainData$prev_freq, trainData$prev_freq)) * prev_freq)
+    
+    testData = testData %>% mutate(orthogonal_surp = surp - (cov(trainData$freq, trainData$surp)/cov(trainData$freq, trainData$freq)) * freq,
+                                     prev_orthogonal_surp = prev_surp - (cov(trainData$prev_freq, trainData$prev_surp)/cov(trainData$prev_freq, trainData$prev_freq)) * prev_freq,
+                                     orthogonal_pmi = pmi - (cov(trainData$freq, trainData$pmi)/cov(trainData$freq, trainData$freq)) * freq,
+                                     prev_orthogonal_pmi = prev_pmi - (cov(trainData$prev_freq, trainData$prev_pmi)/cov(trainData$prev_freq, trainData$prev_freq)) * prev_freq)
+    
+    if (linear) {
+      model = lm(as.formula(form), data = trainData)
+    } else {
+      if(id == "baseline") {
+        model = lm(as.formula(form), data = trainData)
+      } 
+      else{
+        model = gam(as.formula(form), data = trainData)
+      }
+    }
+    
+    # Save models to use later for looking at the effect
+    # Don't save the ensemble models
+    if(id %in% c("freq", "pmi", "surp", "pmi+freq", "surp+freq", "all", "baseline", "opmi", "osurp", "opmi+freq", "osurp+freq")) {
+      model_id = paste(lang, psychometric, id, i, sep="-")
+      saveRDS(model, file=paste("./models/", model_id,".rds", sep=""))
+    }
+    
+    stdev = sigma(model)
+    densities <- log(dnorm(testData[[d_var]],mean=predict(model, newdata=testData),sd=stdev))
+    estimates <- c(estimates, densities)
+  }
+
+  return(estimates)
+}
+
+```
+
+
+```{r}
+
+regression_names = c("surp", "freq", "pmi", "pmi+freq", "surp+freq", "baseline", "opmi", "osurp", "opmi+freq", "osurp+freq")
+
+dll_raw_df = data.frame()
+
+for (lang in langs) {
+
+  print(paste0("Fitting model for ", lang))
+  
+  df = read.csv(paste0("./merged_data/", lang, ".csv")) %>%
+    filter(freq > 0, prev_freq > 0, prev2_freq > 0) %>%
+    mutate( freq = -log2(freq), prev_freq = -log2(prev_freq), prev2_freq = -log2(prev2_freq),
+            pmi = freq - surp, 
+            prev_pmi = prev_freq - prev_surp, 
+            prev2_pmi = prev2_freq - prev2_surp)
+  
+  for (m in models) {
+    
+    df_eval = df %>% filter(model == m) %>% drop_na()
+  
+    for (psychometric in psychometrics) {
+      
+      regression_forms = c(
+        #paste0(psychometric, " ~ surp + prev_surp + prev2_surp + freq + prev_freq + prev2_freq + len + prev_len + prev2_len"), # SURPRISAL
+        #paste(psychometric, "~ s(surp, bs = 'cr', k = 6) + s(prev_surp, bs = 'cr', k = 6) + s(len, bs = 'cr', k = 6) + s(prev_len, bs = 'cr', k = 6)"), #SURPRISAL
+        paste(psychometric, "~ s(surp, bs = 'cr', k = 6) + s(prev_surp, bs = 'cr', k = 6)"), #SURPRISAL
+        
+        #paste0(psychometric, " ~ freq + prev_freq + prev2_freq + len + prev_len + prev2_len"), # FREQUENCY
+        paste(psychometric, "~ s(freq, bs = 'cr', k = 6) + s(prev_freq, bs = 'cr', k = 6)"), #FREQUENCY
+        
+        #paste0(psychometric, " ~ pmi + prev_pmi + prev2_pmi + freq + prev_freq + prev2_freq + len + prev_len + prev2_len"), # PMI
+        paste(psychometric, "~ s(pmi, bs = 'cr', k = 6) + s(prev_pmi, bs = 'cr', k = 6)"), #PMI
+        
+        paste(psychometric, "~ s(pmi, bs = 'cr', k = 6) + s(prev_pmi, bs = 'cr', k = 6) + s(freq, bs = 'cr', k = 6) + s(prev_freq, bs = 'cr', k = 6)"), #PMI+FREQ
+        
+        paste(psychometric, "~ s(surp, bs = 'cr', k = 6) + s(prev_surp, bs = 'cr', k = 6) + s(freq, bs = 'cr', k = 6) + s(prev_freq, bs = 'cr', k = 6)"), #SURP+FREQ
+
+
+#        paste(psychometric, "~ s(pmi, bs = 'cr', k = 6) + s(prev_pmi, bs = 'cr', k = 6) + s(freq, bs = 'cr', k = 6) + s(prev_freq, bs = 'cr', k = 6) + s(surp, bs = 'cr', k = 6) + s(prev_surp, bs = 'cr', k = 6)+  te(len, bs = 'cr') + te(prev_len, bs = 'cr')"), #ALL
+
+        #paste0(psychometric, " ~ freq + prev_freq + prev2_freq + len + prev_len + prev2_len") # BASELINE
+        #paste(psychometric, "~ s(len, bs = 'cr', k = 6) + s(prev_len, bs = 'cr', k = 6)"), #BASELINE
+        paste(psychometric, "~ 1"), #BASELINE
+
+        paste(psychometric, "~ s(orthogonal_pmi, bs = 'cr', k = 6) + s(prev_orthogonal_pmi, bs = 'cr', k = 6)"), #OPMI
+
+        paste(psychometric, "~ s(orthogonal_surp, bs = 'cr', k = 6) + s(prev_orthogonal_surp, bs = 'cr', k = 6)"), #OSURP
+
+        paste(psychometric, "~ s(orthogonal_pmi, bs = 'cr', k = 6) + s(prev_orthogonal_pmi, bs = 'cr', k = 6) + s(freq, bs = 'cr', k = 6) + s(prev_freq, bs = 'cr', k = 6)"), #OPMI+FREQ
+
+        paste(psychometric, "~ s(orthogonal_surp, bs = 'cr', k = 6) + s(prev_orthogonal_surp, bs = 'cr', k = 6) + s(freq, bs = 'cr', k = 6) + s(prev_freq, bs = 'cr', k = 6)") #OSURP+FREQ
+      )
+      
+      loglik_df = data.frame(names=regression_names, forms=regression_forms) %>%
+        mutate(logliks = map2(regression_forms, regression_names, model_cross_val, df=df_eval, d_var=psychometric, mixed_effects=F, psychometric=psychometric, lang=lang )) %>%
+        dplyr::select(-forms)
+      
+      loglik_df = loglik_df %>% unnest(cols = c(logliks)) %>% mutate(lang = lang, psychometric = psychometric, model = m)
+      dll_raw_df = rbind(dll_raw_df, loglik_df)
+      
+    }
+  }
+}
+
+
+```
+
+## Data for each language individually
+
+```{r}
+#comps = c("surp", "freq", "pmi")
+comps = c("surp", "freq", "pmi", "pmi+freq", "surp+freq", "osurp", "osurp+freq")
+
+
+dll_xlang_surp_df = data.frame()
+for(l in langs){
+  
+  print(paste0("Tests for ", l)) 
+  
+  for (ps in psychometrics){
+    for(c in comps){
+      for(m in models) {
+
+        if(c != "baseline") {
+          target_df = dll_raw_df %>% filter(psychometric == ps, names == c, lang == l, model == m)
+          baseline_df = dll_raw_df %>% filter(psychometric == ps, names == "baseline", lang == l, model == m)
+          dll = target_df$logliks - baseline_df$logliks
+          dll = dll[!is.na(dll)]
+          ptest = perm.test(dll, num.sim = 500)
+          dll_df = data.frame(comp = c, mean = mean(dll), upper = mean(dll) + (1.96 * std.error(dll)),
+                              lower = mean(dll) - (1.96 * std.error(dll)), ptest_pval = ptest$p.value,
+                              lang = l, psychometric = ps, model = m)
+          dll_xlang_surp_df = rbind(dll_xlang_surp_df, dll_df)
+        }
+      }
+    }
+  }
+}
+
+```
+
+## Data for languages as a whole
+
+```{r}
+
+dll_agg_surp_df = data.frame()
+for (ps in psychometrics){
+  for(c in comps){
+    for(m in models) {
+
+        if(c != "baseline") {
+          target_df = dll_raw_df %>% filter(psychometric == ps, names == c, model == m)
+          baseline_df = dll_raw_df %>% filter(psychometric == ps, names == "baseline", model == m)
+          dll = target_df$logliks - baseline_df$logliks
+          dll = dll[!is.na(dll)]
+          ptest = perm.test(dll, num.sim = 500)
+          dll_df = data.frame(comp = c, mean = mean(dll), upper = mean(dll) + (1.96 * std.error(dll)),
+                              lower = mean(dll) - (1.96 * std.error(dll)), ptest_pval = ptest$p.value,
+                              lang = "All", psychometric = ps, model = m)
+          dll_agg_surp_df = rbind(dll_agg_surp_df, dll_df)
+        }
+    }
+  }
+}
+
+
+```
+
+
+### Plot all the languages
+
+```{r}
+# Merge the dataframes
+dll_xlang_surp_df %>%
+  rename(target = comp) %>%
+  mutate(sig = case_when( ptest_pval >= 0.05 ~ " ",
+                          ptest_pval < 0.05 & ptest_pval >= 0.01  ~ "*",
+                          ptest_pval < 0.01 & ptest_pval >= 0.001  ~ "**",
+                          ptest_pval < 0.001  ~ "***")) %>%
+  mutate(psychometric = case_when(psychometric == "firstfix_rt" ~ "First Fixation", 
+                                  psychometric == "gaze_rt" ~ "Gaze Duration", 
+                                  psychometric == "total_rt" ~ "Total Fixation")) %>%
+  mutate(model = case_when(model == "mgpt_lc" ~ "mGPT",
+                           model == "monot_all" ~ "monoT")) %>%
+  mutate(model = factor(model, levels = c("mGPT", "monoT"))) %>%
+  #mutate(target = factor(target, levels = c("freq", "surp", "pmi", "osurp", "surp+freq", "pmi+freq", "osurp+freq"), labels = c("Frequency", "Surprisal", "PMI", "Orthogonalized\nSurprisal/PMI", "Surprisal & Frequency", "PMI & Frequency", "Orthogonalized\nSurp./PMI & Freq."))) %>%
+  mutate(target = factor(target, levels = c("freq", "surp", "pmi", "osurp", "surp+freq", "pmi+freq", "osurp+freq"), labels = c("Freq.", "Surp.", "PMI", "Orthog.\nSurp.", "Surp.\n& Freq.", "PMI\n& Freq.", "Orthog.\nSurp.\n& Freq."))) %>%
+  
+   
+  ggplot(aes(x = target, y = mean, color = lang)) +
+    #scale_x_discrete(labels =c("freq", "surp", "pmi", "orthogonalized\nsurprisal", "surp+freq", "pmi+freq", "orthogonalized\nsurprisal+freq")) + 
+    geom_hline(yintercept=0, color="black", linetype="dashed", alpha =0.5) +
+  
+    #geom_point(position = position_dodge(width = 0.1), size = 2) +
+    geom_errorbar(aes(ymin=lower, ymax=upper), width = 0.1, position = position_dodge(width = 0.8 ), alpha=0.3) +
+    
+    geom_label(aes(label=lang, group=lang), size=2.5, position = position_dodge(width = 0.8), label.padding=unit(0.5, "mm")) +
+    #geom_text_repel(aes(label=lang, group=target), size=3, label.padding=unit(0.7, "mm"), min.segment.length = unit(0, 'lines')) +
+  
+    #geom_text(aes(y = 0.08, label = sig), size = 3, show.legend = FALSE) +
+    ylab("Delta Log Likelihood \n (average  per word)") + 
+    xlab("") +
+    facet_grid(.~target, scales="free", space = "free") +
+    labs(color = "") +
+    guides(color=guide_legend(ncol=2)) +
+    #scale_x_discrete(labels = c(bquote(w[t-2]), bquote(w[t-1]), bquote(w[t]))) +
+    #scale_color_manual(values = c("#a1dab4", "#41b6c4", "#225ea8")) +
+    #ggtitle("Contribution of Surprisal to ΔLL") +
+  theme(
+    strip.background = element_blank(),
+    strip.text.x = element_blank(),
+    text = element_text(family="serif"),
+    legend.position = "none",
+    axis.title.x = element_blank(),
+    panel.spacing = unit(0.1, "lines"),
+    axis.text.x = element_text(angle = 90, hjust = 1, vjust=0.5)#,
+    #panel.border = element_rect(color = "grey", fill =  NA, size = 0.5)
+  )
+ggsave("./images/results_agg_all_langs.pdf", device = "pdf", width = 6, height = 3)
+
+
+```
+
+
+### Plot the cross language averages
+
+```{r}
+
+# Merge the dataframes
+dll_agg_surp_df %>%
+  rename(target = comp) %>%
+  mutate(sig = case_when( ptest_pval >= 0.05 ~ " ",
+                          ptest_pval < 0.05 & ptest_pval >= 0.01  ~ "*",
+                          ptest_pval < 0.01 & ptest_pval >= 0.001  ~ "**",
+                          ptest_pval < 0.001  ~ "***")) %>%
+  mutate(psychometric = case_when(psychometric == "firstfix_rt" ~ "First Fixation", 
+                                  psychometric == "gaze_rt" ~ "Gaze Duration", 
+                                  psychometric == "total_rt" ~ "Total Fixation")) %>%
+  mutate(model = case_when(model == "mgpt_lc" ~ "mGPT",
+                           model == "monot_all" ~ "monoT")) %>%
+  mutate(model = factor(model, levels = c("mGPT", "monoT"))) %>%
+  mutate(target = factor(target, levels = c("freq", "surp", "pmi", "osurp", "surp+freq", "pmi+freq", "osurp+freq"), labels = c("frequency", "surprisal", "pmi", "orthogonalized surprisal/pmi", "surprisal and frequency", "pmi and frequency", "orthogonalized surprisal/pmi and frequency"))) %>%
+  ggplot(aes(x = target, y = mean, color = target)) + scale_x_discrete(labels =c("freq", "surp", "pmi", "osurp", "surp+freq", "pmi+freq", "osurp+freq")) + 
+    geom_hline(yintercept=0, color="black", linetype="dashed", alpha =0.5) +
+    geom_point(position = position_dodge(width = 0.6), size = 3) +
+    #geom_text(aes(y = 0.08, label = sig), size = 3, show.legend = FALSE) +
+    geom_errorbar(aes(ymin=lower, ymax=upper), width = 0.1, position = position_dodge(width = 0.6)) +
+    ylab("Delta Log Liklihood \n (average  per word)") + 
+    xlab("") +
+    facet_grid(.~psychometric) +
+    labs(color = "RT Predictor") +
+    #scale_x_discrete(labels = c(bquote(w[t-2]), bquote(w[t-1]), bquote(w[t]))) +
+    #scale_color_manual(values = c("#a1dab4", "#41b6c4", "#225ea8")) +
+    #ggtitle("Contribution of Surprisal to ΔLL") +
+  theme(
+    text = element_text(family="serif"),
+    legend.position = "right",
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1)#,
+    #panel.border = element_rect(color = "grey", fill =  NA, size = 0.5)
+  )
+
+ggsave("./images/results_agg.pdf", device = "pdf", width = 8.5, height = 4)
+
+
+```
+
+
+### Plot everything in a combined figure
+
+
+```{r}
+
+# Merge the dataframes
+dll_surp_plotting_df = rbind(dll_xlang_surp_df, dll_agg_surp_df)
+options(scipen=999)
+
+dll_surp_plotting_df %>%
+  mutate(lang = factor(lang, levels = c("All", "du", "en", "fi", "ge", "gr", "he", "it", "ko", "ru", "sp", "tr"),
+       labels = c("All", "Dutch", "English", "Finnish", "German", "Greek", "Hebrew", "Italian", "Korean", "Russian", "Spanish", "Turkish"))) %>%
+  filter(model %in% c("mgpt_lc", "monot_all")) %>%
+  rename(target = comp) %>%
+  mutate(sig = case_when( ptest_pval >= 0.05 ~ " ",
+                          ptest_pval < 0.05 & ptest_pval >= 0.01  ~ "*",
+                          ptest_pval < 0.01 & ptest_pval >= 0.001  ~ "**",
+                          ptest_pval < 0.001  ~ "***")) %>%
+  mutate(psychometric = case_when(psychometric == "firstfix_rt" ~ "First Fixation", 
+                                  psychometric == "gaze_rt" ~ "Gaze Duration", 
+                                  psychometric == "total_rt" ~ "Total Fixation")) %>%
+  mutate(model = case_when(model == "mgpt_lc" ~ "mGPT",
+                           model == "monot_all" ~ "monoT")) %>%
+  mutate(model = factor(model, levels = c("mGPT", "monoT"))) %>%
+  mutate(target = factor(target,levels = c("freq", "surp", "pmi", "osurp", "surp+freq", "pmi+freq", "osurp+freq"))) %>%
+  ggplot(aes(x = target, y = mean, color = target)) +
+    geom_hline(yintercept=0, color="black", linetype="dashed", alpha =0.5) +
+    geom_point(position = position_dodge(width = 0.6), size = 2) +
+    #geom_text(aes(y = 0.08, label = sig), size = 3, show.legend = FALSE) +
+    geom_errorbar(aes(ymin=lower, ymax=upper), width = 0.1, position = position_dodge(width = 0.6)) +
+    ylab("Delta Log Liklihood (average  per word)") + 
+    xlab("") +
+    facet_grid(psychometric~lang) +
+    labs(color = "Eye Movement Measure") +
+    #scale_x_discrete(labels = c(bquote(w[t-2]), bquote(w[t-1]), bquote(w[t]))) +
+    #scale_color_manual(values = c("#a1dab4", "#41b6c4", "#225ea8")) +
+    #ggtitle("Contribution of Surprisal to ΔLL") +
+  theme(
+    text = element_text(family="serif"),
+    legend.position = "bottom",
+    axis.title.x = element_blank(),
+    axis.text.x = element_text(angle = 45, hjust = 1)#,
+    #panel.border = element_rect(color = "grey", fill =  NA, size = 0.5)
+  )
+
+ggsave("./images/results_gd.pdf", device = "pdf", width = 11.5, height = 6)
+
+
+```
+
+```{r}
+
+target_vars = c("surp", "freq", "pmi")
+
+
+samples_df = data.frame()
+
+for(lang in langs) {
+  for(ps in psychometrics){
+    for(target in target_vars){
+      for(i in 1:10){
+        
+        model_file_name = paste0("./models/", paste(lang, ps, target, as.character(i), sep="-"), ".rds")
+        model = readRDS(model_file_name)
+        terms_to_predict=c(paste0("s(",target,")"), paste0("s(prev_",target, ")"))
+        target_var = target
+        
+        newdata = data.frame(x=seq(-10,20,by=0.1), prev_x=0, len=0, prev_len=0)
+        names(newdata)[1] <- target
+        names(newdata)[2] <- paste0("prev_",target)
+
+        # Returns a matrix N_samples * N_terms.
+        per_term_predictions = predict(model, newdata=newdata, terms=terms_to_predict, type="terms")
+        # Additive model -- sum across predictor response contributions (matrix columns).
+        newdata = newdata %>% mutate(y = rowSums(per_term_predictions))
+        
+        names(newdata)[1] <- "target"
+        names(newdata)[2] <- paste0("prev_target")
+        
+        samples_df = rbind(samples_df, newdata %>% dplyr::select(-prev_target, -len, -prev_len) %>% mutate(lang=lang, psychometric=ps, target_var = target_var, fold = i))
+        
+      }
+    }
+  }
+}
+
+```
+
+```{r}
+
+alpha=0.05
+result = samples_df %>%
+    group_by(target, psychometric, target_var) %>% 
+      summarise(y_lower=quantile(y, alpha / 2), 
+                y_upper=quantile(y, 1 - alpha / 2),
+                y=mean(y),
+                n=n()) %>% 
+    ungroup() %>%
+    filter( !(target_var != "pmi" & target < 0) ) %>%
+    group_by(psychometric, target_var) %>%
+      mutate(offset = if_else(target_var != "pmi", first(y), median(y)),
+             y = y - offset,
+             y_lower = y_lower - offset,
+             y_upper = y_upper - offset) %>%
+    ungroup()
+
+
+```
+
+```{r}
+
+result %>%
+  mutate(psychometric = case_when(psychometric == "firstfix_rt" ~ "First Fixation", 
+                                  psychometric == "gaze_rt" ~ "Gaze Duration", 
+                                  psychometric == "total_rt" ~ "Total Fixation")) %>%
+  mutate(target_var = factor(target_var, levels = c("freq", "surp", "pmi"), labels = c("Freq", "Surp", "PMI"))) %>%
+  ggplot(aes(x= target, y=y, fill = psychometric)) +
+    geom_line() +
+    geom_ribbon(aes(x=target, ymin=y_lower, ymax=y_upper), alpha=0.3, colour = NA) +
+    facet_wrap(target_var~psychometric, scales="free_x", strip.position = "top", nrow=1) +
+  ylab("Predicted Slowdown in MS") +
+  xlab("Value of Predictor in Model") +
+  theme(
+    legend.position = "bottom",
+    text = element_text(family="serif")
+    #strip.text = element_text(size = 12)
+  )
+
+ggsave("./images/function.pdf", device = "pdf", width = 10, height = 4.5)
+
+
+```
+
