@@ -32,7 +32,7 @@ options(dplyr.summarise.inform = FALSE)
 
 set.seed(444)
 langs = c("du", "en", "fi", "ge", "gr", "he", "it", "ko", "sp", "tr", "ru")
-psychometrics = c("total_rt", "gaze_rt", "firstfix_rt")
+psychometrics = c("gaze_rt")
 models = c("mgpt_lc")
 comps = c("target", "baseline")
 
@@ -45,7 +45,7 @@ combined_df = data.frame()
 
 for(lang in langs){
   
-   df = read.csv(paste0("./merged_data/", lang, ".csv")) %>%
+   df = read.csv(paste0("./merged_data_no_zero/", lang, ".csv")) %>%
     filter(freq > 0, prev_freq > 0, prev2_freq > 0) %>%
     mutate( freq = -log2(freq), prev_freq = -log2(prev_freq), prev2_freq = -log2(prev2_freq),
             pmi = freq - surp, 
@@ -154,7 +154,7 @@ for (l in langs) {
   
   print(paste0("Fitting standard model for ", l))
   
-  df = read.csv(paste0("./merged_data/", l, ".csv")) %>%
+  df = read.csv(paste0("./merged_data_no_zero/", l, ".csv")) %>%
     filter(freq > 0, prev_freq > 0, prev2_freq > 0) %>%
     mutate( freq = -log2(freq), prev_freq = -log2(prev_freq), prev2_freq = -log2(prev2_freq),
             pmi = freq - surp, 
@@ -195,7 +195,7 @@ for (l in langs) {
   
   print(paste0("Fitting orthogonalized model for ", l))
   
-  df = read.csv(paste0("./merged_data/", l, ".csv")) %>%
+  df = read.csv(paste0("./merged_data_no_zero/", l, ".csv")) %>%
     filter(freq > 0, prev_freq > 0, prev2_freq > 0) %>%
     mutate( freq = -log2(freq), prev_freq = -log2(prev_freq), prev2_freq = -log2(prev2_freq),
             pmi = freq - surp, 
@@ -304,8 +304,8 @@ ggsave("./images/orthogonalized_comparison_lmg.pdf", width = 9, height = 5)
 
 ```{r}
 
-#toggle_surp = FALSE
-toggle_surp = TRUE
+toggle_surp = FALSE
+#toggle_surp = TRUE
 
 xlang_lmg_df = data.frame(matrix(ncol = 7, nrow = 0))
 columnnames = c("R2", "surp OR pmi", "previous surp OR pmi", "frequency", "previous frequency", "length", "previous length")
@@ -322,7 +322,7 @@ for (l in langs) {
   
   print(paste0("Fitting standard model for ", l))
   
-  df = read.csv(paste0("./merged_data/", l, ".csv")) %>%
+  df = read.csv(paste0("./merged_data_no_zero/", l, ".csv")) %>%
     filter(freq > 0, prev_freq > 0, prev2_freq > 0) %>%
     mutate( freq = -log2(freq), prev_freq = -log2(prev_freq), prev2_freq = -log2(prev2_freq),
             pmi = freq - surp, 
@@ -356,7 +356,7 @@ for (l in langs) {
   
   print(paste0("Fitting orthogonalized model for ", l))
   
-  df = read.csv(paste0("./merged_data/", l, ".csv")) %>%
+  df = read.csv(paste0("./merged_data_no_zero/", l, ".csv")) %>%
     filter(freq > 0, prev_freq > 0, prev2_freq > 0) %>%
     mutate( freq = -log2(freq), prev_freq = -log2(prev_freq), prev2_freq = -log2(prev2_freq),
             pmi = freq - surp, 
@@ -504,7 +504,7 @@ for (l in langs) {
   
   print(paste0("Fitting standard model for ", l))
   
-  df = read.csv(paste0("./merged_data/", l, ".csv")) %>%
+  df = read.csv(paste0("./merged_data_no_zero/", l, ".csv")) %>%
     filter(freq > 0, prev_freq > 0, prev2_freq > 0) %>%
     mutate( freq = -log2(freq), prev_freq = -log2(prev_freq), prev2_freq = -log2(prev2_freq),
             pmi = freq - surp, 
@@ -531,7 +531,7 @@ for (l in langs) {
   
   print(paste0("Fitting orthogonalized model for ", l))
   
-  df = read.csv(paste0("./merged_data/", l, ".csv")) %>%
+  df = read.csv(paste0("./merged_data_no_zero/", l, ".csv")) %>%
     filter(freq > 0, prev_freq > 0, prev2_freq > 0) %>%
     mutate( freq = -log2(freq), prev_freq = -log2(prev_freq), prev2_freq = -log2(prev2_freq),
             pmi = freq - surp, 
@@ -614,6 +614,10 @@ ggsave("./images/orthogonalized_frequency_comparison_lmg.pdf", width = 9, height
 ## Compute DLL for Each Language
 
 ```{r}
+psychometrics = c("total_rt", "gaze_rt", "firstfix_rt")
+```
+
+```{r}
 
 model_cross_val = function(form, id, df, d_var, mixed_effects, psychometric, lang, num_folds=10, linear=FALSE){
   
@@ -675,7 +679,7 @@ for (lang in langs) {
 
   print(paste0("Fitting model for ", lang))
   
-  df = read.csv(paste0("./merged_data/", lang, ".csv")) %>%
+  df = read.csv(paste0("./merged_data_no_zero/", lang, ".csv")) %>%
     filter(freq > 0, prev_freq > 0, prev2_freq > 0) %>%
     mutate( freq = -log2(freq), prev_freq = -log2(prev_freq), prev2_freq = -log2(prev2_freq),
             pmi = freq - surp, 
@@ -805,9 +809,8 @@ dll_xlang_surp_df %>%
                           ptest_pval < 0.05 & ptest_pval >= 0.01  ~ "*",
                           ptest_pval < 0.01 & ptest_pval >= 0.001  ~ "**",
                           ptest_pval < 0.001  ~ "***")) %>%
-  mutate(psychometric = case_when(psychometric == "firstfix_rt" ~ "First Fixation", 
-                                  psychometric == "gaze_rt" ~ "Gaze Duration", 
-                                  psychometric == "total_rt" ~ "Total Fixation")) %>%
+  filter(psychometric == "gaze_rt") %>%
+  mutate(psychometric = case_when(psychometric == "gaze_rt" ~ "Gaze Duration")) %>%
   mutate(model = case_when(model == "mgpt_lc" ~ "mGPT",
                            model == "monot_all" ~ "monoT")) %>%
   mutate(model = factor(model, levels = c("mGPT", "monoT"))) %>%
