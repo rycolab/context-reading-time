@@ -1,9 +1,9 @@
 # Multilingual Eye-Tracking Corpus (MECO) ID Fix
 # A. Opedal, E. Chodroff, R. Cotterell, E. Wilcox
-# 29 Oct 2024
+# 25 June 2025
 
 library(tidyverse)
-path <- "INSERT"
+path <- "/Users/andreasopedal/Documents/research/pmi-vs-reading/context-reading-time/"
 
 ##############################
 ### LOAD L1 MECO V1.2 DATA ###
@@ -50,22 +50,18 @@ non_unique_ids <- joint.data %>%
 ### TRANSFORM COLUMNS ###
 #########################  
 
-# HUMAN RT DATA
 rt_data <- joint.data
 rt_data <- rt_data %>%
   # dur = total reading time
   mutate(dur = as.double(dur)) %>%
-  mutate(dur = if_else(is.na(dur), 0, dur)) %>% #Set the reading time for skipped words to 0
   rename(total_rt = dur) %>%
   
   # firstrun.dur = "gaze duration"
   mutate(firstrun.dur = as.double(firstrun.dur)) %>%
-  mutate(firstrun.dur = if_else(is.na(firstrun.dur), 0, firstrun.dur)) %>% #Set the reading time for skipped words to 0
   rename(gaze_rt = firstrun.dur) %>%
   
   # firstfix.dur = "first fixation"
   mutate(firstfix.dur = as.double(firstfix.dur)) %>%
-  mutate(firstfix.dur = if_else(is.na(firstfix.dur), 0, firstfix.dur)) %>% #Set the reading time for skipped words to 0
   rename(firstfix_rt = firstfix.dur) %>%
   
   group_by(lang, trialid, ianum, ia) %>%
@@ -129,10 +125,11 @@ print(paste0(lang, " / MGPT LC: Filtered a total of ", sum(rt_data$mismatch), "r
 ##########################  
 ### SEPARATE LANGUAGES ###
 ##########################
+
 for (l in langs) {
   langi <- subset(rt_data, lang == l)
   langi <- langi[order(langi$trialid, langi$ianum), ]
   langi$mismatch <- NULL
-  write.csv(langi, paste0(path, "merged_data/", l, ".csv"), quote = T, row.names = F)
+  write.csv(langi, paste0(path, "merged_data_no_zero/", l, ".csv"), quote = T, row.names = F)
 }
 
